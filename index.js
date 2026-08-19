@@ -15,4 +15,8 @@ app.use('/student', leaderboardRoute);
 app.get('/health', (req, res) => res.json({ ok: true, service: 'aivorah-leaderboard-service' }));
 
 const PORT = process.env.PORT || 4003;
-app.listen(PORT, () => console.log(`[aivorah-leaderboard-service] listening on port ${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`[aivorah-leaderboard-service] listening on port ${PORT}`));
+}
+
+module.exports = app;
