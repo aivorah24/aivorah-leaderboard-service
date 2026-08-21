@@ -191,6 +191,29 @@ async function updateStudentStats(id, body) {
   if (body.lastLesson          != null) patch.last_lesson          = body.lastLesson;
   patch.updated_at = new Date().toISOString();
 
+  // student_stats.student_id has a foreign key on users.id. Right after a
+  // brand-new signup, /user/sync (auth-service) is still asynchronously
+  // writing that users row — StudentDataContext's stats-sync effect can fire
+  // this PUT before it lands, so a blind upsert intermittently 500s on a FK
+  // violation (confirmed via local testing: same request, sometimes 500,
+  // sometimes fine, purely timing-dependent). Mirror getOrCreate()'s guard:
+  // if the user row isn't there yet, skip the write and return the same
+  // zero-state shape rather than erroring — the next sync (this effect
+  // re-fires on every stats change) succeeds once the row has landed.
+  const { data: userExists } = await supabase
+    .from('users')
+    .select('id')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (!userExists) {
+    return normalise({
+      student_id: id, xp_points: 0, level: 1, current_streak: 0,
+      completed_topics: [], study_time_minutes: 0, today_study_minutes: 0,
+      today_xp: 0, assignments_done: 0, last_active_date: todayISO(),
+    });
+  }
+
   const { data, error } = await supabase
     .from('student_stats')
     .upsert({ student_id: id, ...patch }, { onConflict: 'student_id' })

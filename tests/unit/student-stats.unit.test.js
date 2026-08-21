@@ -71,6 +71,19 @@ describe('updateStudentStats', () => {
     supabase._chain.single.mockResolvedValue({ data: null, error: { message: 'boom' } });
     await expect(updateStudentStats('s1', { xpPoints: 1 })).rejects.toMatchObject({ status: 500 });
   });
+
+  // Regression test: right after a brand-new signup, the users row can still
+  // be landing when this PUT fires (StudentDataContext's stats-sync effect).
+  // student_stats.student_id has a FK on users.id, so a blind upsert used to
+  // 500 intermittently — confirmed via local testing (same request, some
+  // requests failed, some didn't, purely timing-dependent on whether the
+  // signup's users-row write had landed yet).
+  test('a real not-yet-created user row is handled gracefully, not a 500', async () => {
+    supabase._chain.maybeSingle.mockResolvedValue({ data: null }); // users row not found
+    const result = await updateStudentStats('brand-new-id', { xpPoints: 500 });
+    expect(result.xpPoints).toBe(0); // zero-state, not the requested patch — nothing was written
+    expect(supabase.from).not.toHaveBeenCalledWith('student_stats'); // never attempted the upsert
+  });
 });
 
 describe('completeLesson', () => {
