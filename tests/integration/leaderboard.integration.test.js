@@ -4,7 +4,19 @@ jest.mock('../../services/leaderboard', () => ({
   getLeaderboard: jest.fn(),
 }));
 
+// index.js now also mounts routes/student-stats.js, which otherwise pulls in
+// the real services/supabase.js (and a real createClient() call) at module
+// load time — mocked here the same way leaderboard is, since this suite only
+// exercises the leaderboard route.
+jest.mock('../../services/student-stats', () => ({
+  getStudentStats: jest.fn(),
+  updateStudentStats: jest.fn(),
+  completeLesson: jest.fn(),
+  recordStudyTime: jest.fn(),
+}));
+
 const { getLeaderboard } = require('../../services/leaderboard');
+const { getStudentStats, updateStudentStats, completeLesson, recordStudyTime } = require('../../services/student-stats');
 const app = require('../../index');
 
 beforeEach(() => {
@@ -82,5 +94,48 @@ describe('GET /student/leaderboard', () => {
     const res = await request(app).get('/student/leaderboard');
     expect(res.status).toBe(500);
     expect(res.body).toEqual({ error: 'db unreachable' });
+  });
+
+  // /student/leaderboard must never be swallowed by student-stats' /:id wildcard.
+  test('a real /student/leaderboard request never reaches getStudentStats', async () => {
+    await request(app).get('/student/leaderboard');
+    expect(getStudentStats).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /student/:id', () => {
+  test('returns the real stats object the service resolves', async () => {
+    getStudentStats.mockResolvedValue({ studentId: 's1', xpPoints: 200 });
+    const res = await request(app).get('/student/s1');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ studentId: 's1', xpPoints: 200 });
+    expect(getStudentStats).toHaveBeenCalledWith('s1');
+  });
+});
+
+describe('PUT /student/:id', () => {
+  test('forwards the real body to updateStudentStats', async () => {
+    updateStudentStats.mockResolvedValue({ studentId: 's1', xpPoints: 500 });
+    const res = await request(app).put('/student/s1').send({ xpPoints: 500 });
+    expect(res.status).toBe(200);
+    expect(updateStudentStats).toHaveBeenCalledWith('s1', { xpPoints: 500 });
+  });
+});
+
+describe('POST /student/:id/complete-lesson', () => {
+  test('a real missing-topic 400 from the service is passed through', async () => {
+    const err = new Error('topic required'); err.status = 400;
+    completeLesson.mockRejectedValue(err);
+    const res = await request(app).post('/student/s1/complete-lesson').send({});
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('POST /student/:id/study-time', () => {
+  test('forwards the real body to recordStudyTime', async () => {
+    recordStudyTime.mockResolvedValue({ studyTimeMinutes: 60 });
+    const res = await request(app).post('/student/s1/study-time').send({ minutes: 10 });
+    expect(res.status).toBe(200);
+    expect(recordStudyTime).toHaveBeenCalledWith('s1', { minutes: 10 });
   });
 });

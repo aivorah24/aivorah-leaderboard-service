@@ -5,12 +5,16 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const leaderboardRoute = require('./routes/leaderboard');
+const studentStatsRoute = require('./routes/student-stats');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// leaderboard MUST mount before student-stats — its literal '/leaderboard'
+// path would otherwise be swallowed by student-stats' '/:id' wildcard.
 app.use('/student', leaderboardRoute);
+app.use('/student', studentStatsRoute);
 
 app.get('/health', (req, res) => res.json({ ok: true, service: 'aivorah-leaderboard-service' }));
 
