@@ -8,7 +8,6 @@
 const supabase = require('./supabase');
 const { client: qdrant, resolveCollection } = require('./qdrant');
 const { normalizeCurriculum } = require('../utils/curriculum');
-const { readEvents } = require('./analytics');
 
 const CURRICULUM_NAME_SET = new Set([
   'ib pyp', 'ib_pyp', 'ibpyp', 'ncert', 'cbse', 'cambridge', 'oxford', 'pearson',
@@ -87,6 +86,7 @@ function normalise(row) {
     todayStudyMinutes:      row.today_study_minutes,
     todayXP:                row.today_xp,
     completedTopics:        row.completed_topics ?? [],
+    startedTopics:          row.started_topics ?? [],
     lastLesson:             row.last_lesson ?? '',
   };
 }
@@ -274,6 +274,39 @@ async function completeLesson(id, body) {
   return normalise(updated);
 }
 
+// B002 fix: persist "opened Learn/Listen but not yet completed" so it
+// survives refresh/re-login — previously tracked only in frontend-local
+// state, which the next GET's full-state hydration silently wiped since
+// this array was never stored. XP/explore-count are already awarded
+// client-side (StudentDataContext.startTopicActivity) and reach the server
+// via the existing generic PUT sync; this endpoint only owns the array
+// itself, atomically, so a stale full-state PUT from an idle tab can never
+// drop a topic another tab just started — same reasoning as completed_topics.
+async function startTopic(id, body) {
+  const { topic } = body ?? {};
+  if (!topic) { const e = new Error('topic required'); e.status = 400; throw e; }
+
+  const record = await getOrCreate(id);
+  const alreadyStarted = (record.started_topics ?? []).includes(topic)
+    || (record.completed_topics ?? []).includes(topic);
+
+  if (alreadyStarted) return normalise(record);
+
+  const { data: updated, error } = await supabase
+    .from('student_stats')
+    .update({
+      started_topics: [...(record.started_topics ?? []), topic],
+      last_active_date: todayISO(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('student_id', id)
+    .select()
+    .single();
+
+  if (error) { const e = new Error(error.message); e.status = 500; throw e; }
+  return normalise(updated);
+}
+
 async function recordStudyTime(id, body) {
   const { minutes = 1, source, subject } = body ?? {};
   const today = todayISO();
@@ -343,33 +376,41 @@ async function getWeeklyActivity(id) {
   };
 }
 
-// ── GET /student/:id/performance?email=... ──────────────────
-// id is unused by the monolith's own implementation (kept for URL-shape
-// compatibility) — performance is looked up by email against analytics_events.
-async function getStudentPerformance(email) {
-  if (!email) return { topics: {}, avgScore: null, topicCount: 0 };
+// ── GET /student/:id/performance ─────────────────────────────
+// Was looked up by email against analytics_events, filtering for
+// 'ibpyp_quiz_result'/'ncert_quiz_result' events — but the frontend's real
+// quiz-completion flow (useQuiz.ts) has never logged those event types (confirmed
+// zero such rows exist anywhere in the database). It DOES write every real quiz
+// attempt to `topic_attempts` via POST /student/track-attempt (topic, subject,
+// grade, score) — this was already the real source of truth, just never wired
+// up here, so Performance/"Mastered"/per-chapter scores stayed stuck at 0% no
+// matter how many quizzes a student actually took. Reads topic_attempts by
+// student_id (the id already in the URL) instead.
+async function getStudentPerformance(id) {
+  if (!id) return { topics: {}, avgScore: null, topicCount: 0 };
 
-  const childEvents = await readEvents({ userEmail: email });
+  const { data: attempts, error } = await supabase
+    .from('topic_attempts')
+    .select('topic, subject, grade, score, created_at')
+    .eq('student_id', id)
+    .order('created_at', { ascending: true });
+  if (error || !attempts) return { topics: {}, avgScore: null, topicCount: 0 };
+
   const topicMap = {};
   const allScores = [];
 
-  for (const e of childEvents) {
-    const topic = e.topic || '';
-    if (!topic) continue;
+  for (const a of attempts) {
+    const topic = a.topic || '';
+    if (!topic || typeof a.score !== 'number') continue;
 
     if (!topicMap[topic]) {
-      topicMap[topic] = { subject: e.subject || '', grade: e.grade || '', quizScores: [], sessions: 0, lastActivity: '' };
+      topicMap[topic] = { subject: a.subject || '', grade: a.grade || '', quizScores: [], sessions: 0, lastActivity: '' };
     }
     const t = topicMap[topic];
-
-    if ((e.eventType === 'ibpyp_quiz_result' || e.eventType === 'ncert_quiz_result') && typeof e.score === 'number') {
-      t.quizScores.push(e.score);
-      allScores.push(e.score);
-    }
-    if (e.eventType === 'ai_lesson_script' || e.eventType === 'lesson_started') {
-      t.sessions++;
-    }
-    if (e.timestamp && e.timestamp > t.lastActivity) t.lastActivity = e.timestamp;
+    t.quizScores.push(a.score);
+    allScores.push(a.score);
+    t.sessions++;
+    if (a.created_at && a.created_at > t.lastActivity) t.lastActivity = a.created_at;
   }
 
   const topics = {};
@@ -423,4 +464,4 @@ async function trackAttempt(body) {
   return { ok: true, passed, attempt: data };
 }
 
-module.exports = { getStudentStats, updateStudentStats, completeLesson, recordStudyTime, getWeeklyActivity, getStudentPerformance, trackAttempt };
+module.exports = { getStudentStats, updateStudentStats, completeLesson, startTopic, recordStudyTime, getWeeklyActivity, getStudentPerformance, trackAttempt };
