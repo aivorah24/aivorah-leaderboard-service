@@ -255,11 +255,19 @@ async function completeLesson(id, body) {
     patch.level             = computeLevel(newXP);
     patch.completed_topics = [...(record.completed_topics ?? []), topic];
 
+    // Increment, not overwrite — a second topic on the same day used to reset this to 1.
+    const { data: todayLog } = await supabase
+      .from('student_daily_log')
+      .select('topics_completed')
+      .eq('student_id', id)
+      .eq('log_date', today)
+      .maybeSingle();
+
     await supabase.from('student_daily_log').upsert({
       student_id:       id,
       log_date:         today,
       xp_earned:        (record.today_xp || 0) + 150,
-      topics_completed: 1,
+      topics_completed: (todayLog?.topics_completed || 0) + 1,
     }, { onConflict: 'student_id,log_date', ignoreDuplicates: false });
   }
 

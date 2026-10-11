@@ -99,6 +99,34 @@ describe('completeLesson', () => {
     expect(result.completedTopics).toEqual(['t1', 't2']);
   });
 
+  test('a second NEW topic on the same day increments the daily log, not overwrites it to 1', async () => {
+    supabase._chain.maybeSingle
+      .mockResolvedValueOnce({ data: STATS_ROW })                   // getOrCreate
+      .mockResolvedValueOnce({ data: { topics_completed: 1 } });    // today's daily log
+    supabase._chain.single.mockResolvedValue({ data: { ...STATS_ROW, completed_topics: ['t1', 't2'] } });
+
+    await completeLesson('s1', { topic: 't2' });
+
+    expect(supabase._chain.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ log_date: expect.any(String), topics_completed: 2 }),
+      expect.anything(),
+    );
+  });
+
+  test('the first topic of the day starts the daily log at 1', async () => {
+    supabase._chain.maybeSingle
+      .mockResolvedValueOnce({ data: STATS_ROW })
+      .mockResolvedValueOnce({ data: null }); // no log row yet today
+    supabase._chain.single.mockResolvedValue({ data: STATS_ROW });
+
+    await completeLesson('s1', { topic: 't2' });
+
+    expect(supabase._chain.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ topics_completed: 1 }),
+      expect.anything(),
+    );
+  });
+
   test('a real ALREADY-completed topic awards no extra XP', async () => {
     supabase._chain.maybeSingle.mockResolvedValue({ data: STATS_ROW });
     supabase._chain.single.mockResolvedValue({ data: STATS_ROW }); // unchanged
