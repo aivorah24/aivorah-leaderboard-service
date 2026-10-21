@@ -29,6 +29,15 @@ router.post('/:id/complete-lesson', async (req, res) => {
   }
 });
 
+router.post('/:id/start-topic', async (req, res) => {
+  try {
+    const stats = await studentStats.startTopic(req.params.id, req.body ?? {});
+    res.json(stats);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
 router.post('/:id/study-time', async (req, res) => {
   try {
     const result = await studentStats.recordStudyTime(req.params.id, req.body ?? {});
@@ -40,7 +49,8 @@ router.post('/:id/study-time', async (req, res) => {
 
 router.get('/:id/weekly', async (req, res) => {
   try {
-    const result = await studentStats.getWeeklyActivity(req.params.id);
+    const period = req.query.period === 'month' ? 'month' : 'week';
+    const result = await studentStats.getWeeklyActivity(req.params.id, period);
     res.json(result);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -49,8 +59,7 @@ router.get('/:id/weekly', async (req, res) => {
 
 router.get('/:id/performance', async (req, res) => {
   try {
-    const email = req.query.email ? String(req.query.email) : '';
-    const result = await studentStats.getStudentPerformance(email);
+    const result = await studentStats.getStudentPerformance(req.params.id);
     res.json(result);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

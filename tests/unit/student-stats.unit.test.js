@@ -23,12 +23,9 @@ jest.mock('../../services/qdrant', () => ({
   resolveCollection: jest.fn(() => ({ collection: 'c', qdrantCurriculum: 'IB PYP', qdrantGrade: 'Grade 4' })),
 }));
 
-jest.mock('../../services/analytics', () => ({ readEvents: jest.fn() }));
-
 const supabase = require('../../services/supabase');
 const qdrant = require('../../services/qdrant');
-const { readEvents } = require('../../services/analytics');
-const { getStudentStats, updateStudentStats, completeLesson, recordStudyTime, getWeeklyActivity, getStudentPerformance, trackAttempt } = require('../../services/student-stats');
+const { getStudentStats, updateStudentStats, completeLesson, startTopic, recordStudyTime, getWeeklyActivity, getStudentPerformance, trackAttempt } = require('../../services/student-stats');
 
 const STATS_ROW = {
   student_id: 's1', xp_points: 200, level: 1, current_streak: 3,
@@ -135,6 +132,32 @@ describe('completeLesson', () => {
   });
 });
 
+describe('startTopic (B002 fix)', () => {
+  test('a real missing topic throws a real 400', async () => {
+    await expect(startTopic('s1', {})).rejects.toMatchObject({ status: 400 });
+  });
+
+  test('a real NEW started topic is appended to started_topics', async () => {
+    supabase._chain.maybeSingle.mockResolvedValue({ data: { ...STATS_ROW, started_topics: ['t1'] } }); // getOrCreate
+    supabase._chain.single.mockResolvedValue({ data: { ...STATS_ROW, started_topics: ['t1', 't3'] } });
+    const result = await startTopic('s1', { topic: 't3' });
+    expect(supabase.from).toHaveBeenCalledWith('student_stats');
+    expect(result.startedTopics).toEqual(['t1', 't3']);
+  });
+
+  test('a real ALREADY-started topic is a no-op, not duplicated', async () => {
+    supabase._chain.maybeSingle.mockResolvedValue({ data: { ...STATS_ROW, started_topics: ['t1'] } });
+    const result = await startTopic('s1', { topic: 't1' });
+    expect(result.startedTopics).toEqual(['t1']); // unchanged, not appended again
+  });
+
+  test('a real ALREADY-completed topic is also treated as started, not re-added', async () => {
+    supabase._chain.maybeSingle.mockResolvedValue({ data: { ...STATS_ROW, completed_topics: ['t1'], started_topics: [] } });
+    const result = await startTopic('s1', { topic: 't1' });
+    expect(result.startedTopics).toEqual([]); // no write attempted — a completed topic is never shown as merely in-progress
+  });
+});
+
 describe('recordStudyTime', () => {
   test('a real minutes increment calls the atomic RPC and returns real totals', async () => {
     supabase._rpcResult.single.mockResolvedValue({
@@ -169,26 +192,68 @@ describe('getWeeklyActivity', () => {
     expect(todayEntry.studyMinutes).toBe(30);
     expect(todayEntry.xp).toBe(50);
   });
+
+  test('period="month" returns 4 real weekly buckets covering the last 28 days, not 7 individual days', async () => {
+    supabase._chain.then = (resolve) => resolve({ data: [] });
+    const result = await getWeeklyActivity('s1', 'month');
+    expect(result.days).toHaveLength(4);
+  });
+
+  test('period="month" sums each real logged day into its real containing week bucket', async () => {
+    const today = new Date();
+    const tenDaysAgo = new Date(today); tenDaysAgo.setDate(today.getDate() - 10);
+    const tenDaysAgoStr = tenDaysAgo.toISOString().split('T')[0];
+    supabase._chain.then = (resolve) => resolve({
+      data: [{ log_date: tenDaysAgoStr, study_minutes: 40, xp_earned: 60, topics_completed: 3 }],
+    });
+    const result = await getWeeklyActivity('s1', 'month');
+    const totalStudyMinutes = result.days.reduce((sum, d) => sum + d.studyMinutes, 0);
+    const totalXp = result.days.reduce((sum, d) => sum + d.xp, 0);
+    expect(totalStudyMinutes).toBe(40);
+    expect(totalXp).toBe(60);
+  });
+
+  test('period defaults to "week" (7 individual days) when not specified, unchanged from before', async () => {
+    supabase._chain.then = (resolve) => resolve({ data: [] });
+    const result = await getWeeklyActivity('s1');
+    expect(result.days).toHaveLength(7);
+  });
 });
 
 describe('getStudentPerformance', () => {
-  test('a real empty email returns the real zero-state shape without querying events', async () => {
+  // Bug: this used to read analytics_events for 'ibpyp_quiz_result'/
+  // 'ncert_quiz_result' events, which the real quiz-completion flow
+  // (useQuiz.ts) never logs — confirmed zero such rows exist anywhere in the
+  // database. Real quiz attempts DO land in topic_attempts (via
+  // POST /student/track-attempt), so that's what this now reads, keyed by
+  // student_id (the id param), not email.
+  test('a real empty id returns the real zero-state shape without querying the DB', async () => {
     const result = await getStudentPerformance('');
     expect(result).toEqual({ topics: {}, avgScore: null, topicCount: 0 });
-    expect(readEvents).not.toHaveBeenCalled();
+    expect(supabase.from).not.toHaveBeenCalledWith('topic_attempts');
   });
 
-  test('real quiz-result events are averaged per topic and overall', async () => {
-    readEvents.mockResolvedValue([
-      { topic: 'Fractions', subject: 'Math', grade: 'Grade 4', eventType: 'ibpyp_quiz_result', score: 80, timestamp: '2026-01-01' },
-      { topic: 'Fractions', subject: 'Math', grade: 'Grade 4', eventType: 'ibpyp_quiz_result', score: 60, timestamp: '2026-01-02' },
-      { topic: 'Fractions', subject: 'Math', grade: 'Grade 4', eventType: 'lesson_started' },
-    ]);
-    const result = await getStudentPerformance('a@a.com');
+  test('real topic_attempts rows are averaged per topic and overall', async () => {
+    supabase._chain.then = (resolve) => resolve({
+      data: [
+        { topic: 'Fractions', subject: 'Math', grade: 'Grade 4', score: 80, created_at: '2026-01-01' },
+        { topic: 'Fractions', subject: 'Math', grade: 'Grade 4', score: 60, created_at: '2026-01-02' },
+      ],
+      error: null,
+    });
+    const result = await getStudentPerformance('student-1');
+    expect(supabase.from).toHaveBeenCalledWith('topic_attempts');
     expect(result.topics.Fractions.avgScore).toBe(70);
-    expect(result.topics.Fractions.sessions).toBe(1);
+    expect(result.topics.Fractions.quizCount).toBe(2);
+    expect(result.topics.Fractions.sessions).toBe(2);
     expect(result.avgScore).toBe(70);
     expect(result.topicCount).toBe(1);
+  });
+
+  test('a Supabase error returns the zero-state shape rather than throwing', async () => {
+    supabase._chain.then = (resolve) => resolve({ data: null, error: { message: 'boom' } });
+    const result = await getStudentPerformance('student-1');
+    expect(result).toEqual({ topics: {}, avgScore: null, topicCount: 0 });
   });
 });
 

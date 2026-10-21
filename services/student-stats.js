@@ -8,7 +8,6 @@
 const supabase = require('./supabase');
 const { client: qdrant, resolveCollection } = require('./qdrant');
 const { normalizeCurriculum } = require('../utils/curriculum');
-const { readEvents } = require('./analytics');
 
 const CURRICULUM_NAME_SET = new Set([
   'ib pyp', 'ib_pyp', 'ibpyp', 'ncert', 'cbse', 'cambridge', 'oxford', 'pearson',
@@ -64,6 +63,34 @@ function todayISO() {
   return new Date().toISOString().split('T')[0];
 }
 
+// Decide the day-rollover patch for getStudentStats() (see aivorah-frontend's
+// BUGS_AND_FIXES.md Bug #3.1 / #22). `current_streak` used to be bumped to 1
+// purely by opening the app on a new calendar day, even for an account that
+// never completed a single lesson/quiz — a login-streak masquerading as a
+// learning-streak. It is credited/continued ONLY when `record` shows real
+// activity happened on the streak's last active day (today_study_minutes,
+// today_xp, or completed_topics growth) — merely viewing the page never
+// awards a streak day on its own. Same fix as the monolith's
+// ai-mentor/server/routes/student.js:computeStreakRollover — kept in sync
+// since this service was ported verbatim from it.
+function computeStreakRollover(record, today) {
+  if (record.last_active_date === today) return null;
+  const yesterday = new Date(`${today}T00:00:00Z`);
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  const yISO = yesterday.toISOString().split('T')[0];
+  const hadRealActivityYesterday =
+    record.last_active_date === yISO &&
+    ((record.today_study_minutes || 0) > 0 ||
+      (record.today_xp || 0) > 0 ||
+      (record.completed_topics || []).length > 0);
+  return {
+    today_study_minutes: 0,
+    today_xp: 0,
+    current_streak: hadRealActivityYesterday ? (record.current_streak || 0) + 1 : 0,
+    last_active_date: today,
+  };
+}
+
 function computeLevel(xp) {
   let level = 1, threshold = 500, total = 0;
   while (xp >= total + threshold) { total += threshold; threshold += 250; level++; }
@@ -87,6 +114,7 @@ function normalise(row) {
     todayStudyMinutes:      row.today_study_minutes,
     todayXP:                row.today_xp,
     completedTopics:        row.completed_topics ?? [],
+    startedTopics:          row.started_topics ?? [],
     lastLesson:             row.last_lesson ?? '',
   };
 }
@@ -128,21 +156,12 @@ async function getStudentStats(id) {
   let record = await getOrCreate(id);
   const today = todayISO();
 
-  if (record.last_active_date !== today) {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yISO = yesterday.toISOString().split('T')[0];
-    const newStreak = record.last_active_date === yISO
-      ? (record.current_streak || 0) + 1
-      : 1;
-
+  const rollover = computeStreakRollover(record, today);
+  if (rollover) {
     const { data: updated } = await supabase
       .from('student_stats')
       .update({
-        today_study_minutes: 0,
-        today_xp:            0,
-        current_streak:      newStreak,
-        last_active_date:    today,
+        ...rollover,
         updated_at:          new Date().toISOString(),
       })
       .eq('student_id', id)
@@ -282,6 +301,39 @@ async function completeLesson(id, body) {
   return normalise(updated);
 }
 
+// B002 fix: persist "opened Learn/Listen but not yet completed" so it
+// survives refresh/re-login — previously tracked only in frontend-local
+// state, which the next GET's full-state hydration silently wiped since
+// this array was never stored. XP/explore-count are already awarded
+// client-side (StudentDataContext.startTopicActivity) and reach the server
+// via the existing generic PUT sync; this endpoint only owns the array
+// itself, atomically, so a stale full-state PUT from an idle tab can never
+// drop a topic another tab just started — same reasoning as completed_topics.
+async function startTopic(id, body) {
+  const { topic } = body ?? {};
+  if (!topic) { const e = new Error('topic required'); e.status = 400; throw e; }
+
+  const record = await getOrCreate(id);
+  const alreadyStarted = (record.started_topics ?? []).includes(topic)
+    || (record.completed_topics ?? []).includes(topic);
+
+  if (alreadyStarted) return normalise(record);
+
+  const { data: updated, error } = await supabase
+    .from('student_stats')
+    .update({
+      started_topics: [...(record.started_topics ?? []), topic],
+      last_active_date: todayISO(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('student_id', id)
+    .select()
+    .single();
+
+  if (error) { const e = new Error(error.message); e.status = 500; throw e; }
+  return normalise(updated);
+}
+
 async function recordStudyTime(id, body) {
   const { minutes = 1, source, subject } = body ?? {};
   const today = todayISO();
@@ -312,9 +364,47 @@ async function recordStudyTime(id, body) {
   return { studyTimeMinutes: totalMins, todayStudyMinutes: todayMins, learningPathMinutes: learningPathMins, assignmentTimeMinutes: assignmentMins, challengeTimeMinutes: challengeMins };
 }
 
-// ── GET /student/:id/weekly ─────────────────────────────────
-async function getWeeklyActivity(id) {
+// ── GET /student/:id/weekly?period=week|month ────────────────
+// "week" (default): the current Mon-Sun, one bar per day, unchanged.
+// "month": the last 28 days grouped into 4 weekly buckets — the frontend's
+// bar chart renders one bar per entry, so 28 individual daily bars would be
+// cramped and repeat day-of-week labels; weekly buckets read cleanly
+// instead. Bug: previously the "Month" tab existed in the UI but nothing
+// ever fetched month-range data — this is the real backend half of that fix.
+async function getWeeklyActivity(id, period = 'week') {
   const today = new Date();
+
+  if (period === 'month') {
+    const from = new Date(today);
+    from.setDate(today.getDate() - 27);
+    const fromStr = from.toISOString().split('T')[0];
+    const toStr = today.toISOString().split('T')[0];
+
+    const { data: logs } = await supabase
+      .from('student_daily_log')
+      .select('*')
+      .eq('student_id', id)
+      .gte('log_date', fromStr)
+      .lte('log_date', toStr);
+
+    const buckets = [0, 1, 2, 3].map(() => ({ studyMinutes: 0, xp: 0, topicsCompleted: 0 }));
+    (logs ?? []).forEach(l => {
+      const daysAgo = Math.floor((today - new Date(`${l.log_date}T00:00:00Z`)) / (1000 * 60 * 60 * 24));
+      const bucketIdx = Math.min(3, Math.max(0, 3 - Math.floor(daysAgo / 7)));
+      buckets[bucketIdx].studyMinutes    += l.study_minutes    ?? 0;
+      buckets[bucketIdx].xp              += l.xp_earned        ?? 0;
+      buckets[bucketIdx].topicsCompleted += l.topics_completed ?? 0;
+    });
+
+    return {
+      days: buckets.map((b, i) => {
+        const bucketStart = new Date(from);
+        bucketStart.setDate(from.getDate() + i * 7);
+        return { date: bucketStart.toISOString().split('T')[0], day: `Wk ${i + 1}`, ...b };
+      }),
+    };
+  }
+
   const todayDay = today.getDay();
   const mondayOffset = todayDay === 0 ? -6 : 1 - todayDay;
   const monday = new Date(today);
@@ -352,32 +442,40 @@ async function getWeeklyActivity(id) {
 }
 
 // ── GET /student/:id/performance?email=... ──────────────────
-// id is unused by the monolith's own implementation (kept for URL-shape
-// compatibility) — performance is looked up by email against analytics_events.
-async function getStudentPerformance(email) {
-  if (!email) return { topics: {}, avgScore: null, topicCount: 0 };
+// Was looked up by email against analytics_events, filtering for
+// 'ibpyp_quiz_result'/'ncert_quiz_result' events — but the frontend's real
+// quiz-completion flow (useQuiz.ts) has never logged those event types (confirmed
+// zero such rows exist anywhere in the database). It DOES write every real quiz
+// attempt to `topic_attempts` via POST /student/track-attempt (topic, subject,
+// grade, score) — this was already the real source of truth, just never wired
+// up here, so Performance/"Mastered"/per-chapter scores stayed stuck at 0% no
+// matter how many quizzes a student actually took. Reads topic_attempts by
+// student_id (the id already in the URL) instead.
+async function getStudentPerformance(id) {
+  if (!id) return { topics: {}, avgScore: null, topicCount: 0 };
 
-  const childEvents = await readEvents({ userEmail: email });
+  const { data: attempts, error } = await supabase
+    .from('topic_attempts')
+    .select('topic, subject, grade, score, created_at')
+    .eq('student_id', id)
+    .order('created_at', { ascending: true });
+  if (error || !attempts) return { topics: {}, avgScore: null, topicCount: 0 };
+
   const topicMap = {};
   const allScores = [];
 
-  for (const e of childEvents) {
-    const topic = e.topic || '';
-    if (!topic) continue;
+  for (const a of attempts) {
+    const topic = a.topic || '';
+    if (!topic || typeof a.score !== 'number') continue;
 
     if (!topicMap[topic]) {
-      topicMap[topic] = { subject: e.subject || '', grade: e.grade || '', quizScores: [], sessions: 0, lastActivity: '' };
+      topicMap[topic] = { subject: a.subject || '', grade: a.grade || '', quizScores: [], sessions: 0, lastActivity: '' };
     }
     const t = topicMap[topic];
-
-    if ((e.eventType === 'ibpyp_quiz_result' || e.eventType === 'ncert_quiz_result') && typeof e.score === 'number') {
-      t.quizScores.push(e.score);
-      allScores.push(e.score);
-    }
-    if (e.eventType === 'ai_lesson_script' || e.eventType === 'lesson_started') {
-      t.sessions++;
-    }
-    if (e.timestamp && e.timestamp > t.lastActivity) t.lastActivity = e.timestamp;
+    t.quizScores.push(a.score);
+    allScores.push(a.score);
+    t.sessions++;
+    if (a.created_at && a.created_at > t.lastActivity) t.lastActivity = a.created_at;
   }
 
   const topics = {};
@@ -409,6 +507,10 @@ async function trackAttempt(body) {
     throw e;
   }
 
+  // PASS_THRESHOLD contract: kept in sync manually with aivorah-frontend's
+  // src/screens/student/utils/masteryRules.ts (PASS_THRESHOLD = 60). No
+  // shared package between the two repos by design (RCA Phase 3 gate 7) —
+  // if this value changes, update both files together.
   const passed = score >= 60;
 
   const { data, error } = await supabase
@@ -431,4 +533,4 @@ async function trackAttempt(body) {
   return { ok: true, passed, attempt: data };
 }
 
-module.exports = { getStudentStats, updateStudentStats, completeLesson, recordStudyTime, getWeeklyActivity, getStudentPerformance, trackAttempt };
+module.exports = { getStudentStats, updateStudentStats, completeLesson, startTopic, recordStudyTime, getWeeklyActivity, getStudentPerformance, trackAttempt, computeStreakRollover };
