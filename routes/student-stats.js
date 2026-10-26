@@ -66,6 +66,15 @@ router.get('/:id/performance', async (req, res) => {
   }
 });
 
+router.get('/:id/attempts', async (req, res) => {
+  try {
+    const result = await studentStats.getTopicAttempts(req.params.id, req.query.subject);
+    res.json(result);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
 router.post('/track-attempt', async (req, res) => {
   try {
     const result = await studentStats.trackAttempt(req.body ?? {});
