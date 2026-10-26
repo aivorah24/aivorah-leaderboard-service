@@ -493,6 +493,46 @@ async function getStudentPerformance(id) {
   return { topics, avgScore, topicCount: Object.keys(topics).length };
 }
 
+// ── GET /student/:id/attempts ────────────────────────────────
+// Every real practice attempt (newest first) with its per-question answers,
+// for the parent's topic drill-down. Optional subject filter (case-insensitive).
+async function getTopicAttempts(id, subject) {
+  if (!id) return { attempts: [] };
+
+  const { data, error } = await supabase
+    .from('topic_attempts')
+    .select('id, topic, subject, attempt_number, score, passed, total_questions, correct_answers, time_spent_seconds, per_question_results, created_at')
+    .eq('student_id', id)
+    .order('created_at', { ascending: false });
+  if (error || !data) return { attempts: [] };
+
+  const want = (subject || '').trim().toLowerCase();
+  const attempts = data
+    // Old completeLesson() rows (no questions) aren't real quizzes.
+    .filter(a => a.topic && typeof a.score === 'number' && (a.total_questions || (a.per_question_results || []).length))
+    .filter(a => !want || (a.subject || '').trim().toLowerCase() === want)
+    .map(a => ({
+      id: a.id,
+      topic: a.topic,
+      subject: a.subject || '',
+      attemptNumber: a.attempt_number ?? null,
+      score: a.score,
+      passed: !!a.passed,
+      totalQuestions: a.total_questions || 0,
+      correctAnswers: a.correct_answers ?? 0,
+      timeSpentSeconds: a.time_spent_seconds || 0,
+      createdAt: a.created_at,
+      questions: (a.per_question_results || []).map(q => ({
+        question: q.question || '',
+        studentAnswer: q.studentAnswer ?? '',
+        correctAnswer: q.correctAnswer ?? '',
+        isCorrect: !!q.isCorrect,
+        timeSeconds: q.timeSeconds ?? null,
+      })),
+    }));
+  return { attempts };
+}
+
 // ── POST /student/track-attempt ──────────────────────────────
 async function trackAttempt(body) {
   const {
@@ -533,4 +573,4 @@ async function trackAttempt(body) {
   return { ok: true, passed, attempt: data };
 }
 
-module.exports = { getStudentStats, updateStudentStats, completeLesson, startTopic, recordStudyTime, getWeeklyActivity, getStudentPerformance, trackAttempt, computeStreakRollover };
+module.exports = { getStudentStats, updateStudentStats, completeLesson, startTopic, recordStudyTime, getWeeklyActivity, getStudentPerformance, getTopicAttempts, trackAttempt, computeStreakRollover };

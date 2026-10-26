@@ -25,7 +25,7 @@ jest.mock('../../services/qdrant', () => ({
 
 const supabase = require('../../services/supabase');
 const qdrant = require('../../services/qdrant');
-const { getStudentStats, updateStudentStats, completeLesson, startTopic, recordStudyTime, getWeeklyActivity, getStudentPerformance, trackAttempt } = require('../../services/student-stats');
+const { getStudentStats, updateStudentStats, completeLesson, startTopic, recordStudyTime, getWeeklyActivity, getStudentPerformance, getTopicAttempts, trackAttempt } = require('../../services/student-stats');
 
 const STATS_ROW = {
   student_id: 's1', xp_points: 200, level: 1, current_streak: 3,
@@ -254,6 +254,39 @@ describe('getStudentPerformance', () => {
     supabase._chain.then = (resolve) => resolve({ data: null, error: { message: 'boom' } });
     const result = await getStudentPerformance('student-1');
     expect(result).toEqual({ topics: {}, avgScore: null, topicCount: 0 });
+  });
+});
+
+describe('getTopicAttempts', () => {
+  const Q = [
+    { question: '2+2?', studentAnswer: '5', correctAnswer: '4', isCorrect: false, timeSeconds: 7 },
+    { question: '3+3?', studentAnswer: '6', correctAnswer: '6', isCorrect: true, timeSeconds: 4 },
+  ];
+
+  test('an empty id returns no attempts without querying the DB', async () => {
+    expect(await getTopicAttempts('')).toEqual({ attempts: [] });
+    expect(supabase.from).not.toHaveBeenCalledWith('topic_attempts');
+  });
+
+  test('returns real attempts with answers, filtered by subject, dropping synthetic rows', async () => {
+    supabase._chain.then = (resolve) => resolve({
+      data: [
+        { id: 'a2', topic: 'Fractions', subject: 'Mathematics', attempt_number: 2, score: 50, passed: false, total_questions: 2, correct_answers: 1, time_spent_seconds: 40, per_question_results: Q, created_at: '2026-10-02' },
+        { id: 'a1', topic: 'Kite', subject: 'English', attempt_number: 1, score: 100, passed: true, total_questions: 2, correct_answers: 2, time_spent_seconds: 30, per_question_results: [], created_at: '2026-10-01' },
+        { id: 'syn', topic: 'Fractions', subject: 'Mathematics', score: 100, total_questions: 0, per_question_results: [], created_at: '2026-09-01' },
+      ],
+      error: null,
+    });
+    const { attempts } = await getTopicAttempts('student-1', 'mathematics');
+    expect(supabase._chain.eq).toHaveBeenCalledWith('student_id', 'student-1');
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({ id: 'a2', topic: 'Fractions', attemptNumber: 2, score: 50, timeSpentSeconds: 40, correctAnswers: 1 });
+    expect(attempts[0].questions[0]).toEqual({ question: '2+2?', studentAnswer: '5', correctAnswer: '4', isCorrect: false, timeSeconds: 7 });
+  });
+
+  test('a Supabase error returns no attempts rather than throwing', async () => {
+    supabase._chain.then = (resolve) => resolve({ data: null, error: { message: 'boom' } });
+    expect(await getTopicAttempts('student-1')).toEqual({ attempts: [] });
   });
 });
 
