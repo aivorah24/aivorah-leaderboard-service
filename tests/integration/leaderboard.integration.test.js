@@ -53,6 +53,25 @@ describe('GET /student/leaderboard', () => {
     expect(getLeaderboard).toHaveBeenCalledWith(expect.objectContaining({ limit: 50 }));
   });
 
+  test('defaults to the all-time period with no custom date or class grade', async () => {
+    await request(app).get('/student/leaderboard');
+    expect(getLeaderboard).toHaveBeenCalledWith(expect.objectContaining({ period: 'all', date: '', classGrade: '' }));
+  });
+
+  test('passes period, date and classGrade through', async () => {
+    await request(app).get('/student/leaderboard?teacherEmail=t%40a.com&period=Custom&date=2026-11-02&classGrade=Grade%204');
+    expect(getLeaderboard).toHaveBeenCalledWith(expect.objectContaining({
+      teacherEmail: 't@a.com', period: 'custom', date: '2026-11-02', classGrade: 'Grade 4',
+    }));
+  });
+
+  test('a bad period/date comes back as a 400, not a 500', async () => {
+    getLeaderboard.mockRejectedValueOnce(Object.assign(new Error('period=custom needs date=YYYY-MM-DD'), { status: 400 }));
+    const res = await request(app).get('/student/leaderboard?period=custom');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/date=YYYY-MM-DD/);
+  });
+
   test('lowercases and trims teacherEmail', async () => {
     await request(app).get('/student/leaderboard?teacherEmail=%20Teacher%40A.com%20');
     expect(getLeaderboard).toHaveBeenCalledWith(expect.objectContaining({ teacherEmail: 'teacher@a.com' }));

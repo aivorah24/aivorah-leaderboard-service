@@ -83,6 +83,54 @@ describe('updateStudentStats', () => {
   });
 });
 
+describe('updateStudentStats — mirrors todayXP into student_daily_log', () => {
+  const today = new Date().toISOString().split('T')[0];
+  const dailyLogUpserts = () => supabase._chain.upsert.mock.calls
+    .map(c => c[0])
+    .filter(row => row && row.log_date);
+
+  beforeEach(() => {
+    supabase._chain.single.mockResolvedValue({ data: STATS_ROW });
+  });
+
+  test('challenge/quiz XP synced via PUT is written to today\'s daily log', async () => {
+    supabase._chain.maybeSingle
+      .mockResolvedValueOnce({ data: { id: 's1' } })       // users row exists
+      .mockResolvedValueOnce({ data: { xp_earned: 150 } }); // today's log so far (a lesson)
+    await updateStudentStats('s1', { todayXP: 230, lastActiveDate: today });
+    expect(dailyLogUpserts()).toEqual([{ student_id: 's1', log_date: today, xp_earned: 230 }]);
+  });
+
+  test('a stale PUT with a lower todayXP never lowers the logged XP', async () => {
+    supabase._chain.maybeSingle
+      .mockResolvedValueOnce({ data: { id: 's1' } })
+      .mockResolvedValueOnce({ data: { xp_earned: 300 } });
+    await updateStudentStats('s1', { todayXP: 120, lastActiveDate: today });
+    expect(dailyLogUpserts()).toEqual([]);
+  });
+
+  test('todayXP left over from another day is not written to today', async () => {
+    supabase._chain.maybeSingle.mockResolvedValueOnce({ data: { id: 's1' } });
+    await updateStudentStats('s1', { todayXP: 90, lastActiveDate: '2020-01-01' });
+    expect(dailyLogUpserts()).toEqual([]);
+  });
+
+  test('no todayXP in the body (or 0) -> no daily log write', async () => {
+    supabase._chain.maybeSingle.mockResolvedValue({ data: { id: 's1' } });
+    await updateStudentStats('s1', { xpPoints: 999 });
+    await updateStudentStats('s1', { todayXP: 0, lastActiveDate: today });
+    expect(dailyLogUpserts()).toEqual([]);
+  });
+
+  test('a failing daily-log write does not fail the stats PUT', async () => {
+    supabase._chain.maybeSingle
+      .mockResolvedValueOnce({ data: { id: 's1' } })
+      .mockRejectedValueOnce(new Error('daily log down'));
+    const result = await updateStudentStats('s1', { todayXP: 40, lastActiveDate: today });
+    expect(result.xpPoints).toBe(200);
+  });
+});
+
 describe('completeLesson', () => {
   test('a real missing topic throws a real 400', async () => {
     await expect(completeLesson('s1', {})).rejects.toMatchObject({ status: 400 });

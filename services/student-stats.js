@@ -240,7 +240,42 @@ async function updateStudentStats(id, body) {
     .single();
 
   if (error) { const e = new Error(error.message); e.status = 500; throw e; }
+
+  await syncDailyXP(id, body);
   return normalise(data);
+}
+
+// Challenge / quiz / explore XP is awarded client-side and reaches the server
+// only through this PUT (todayXP), so student_daily_log.xp_earned used to hold
+// lesson XP only and the today/week/month leaderboards under-counted. Mirror
+// today's total into the daily log. Keep the larger value: a stale PUT from an
+// idle tab must not lower XP already logged for today, and a todayXP left over
+// from another day (lastActiveDate not today) is not written at all.
+async function syncDailyXP(id, body) {
+  if (body?.todayXP == null) return;
+  const xp = Number(body.todayXP);
+  if (!Number.isFinite(xp) || xp <= 0) return;
+  const today = todayISO();
+  if (body.lastActiveDate && body.lastActiveDate !== today) return;
+
+  try {
+    const { data: todayLog } = await supabase
+      .from('student_daily_log')
+      .select('xp_earned')
+      .eq('student_id', id)
+      .eq('log_date', today)
+      .maybeSingle();
+    if ((todayLog?.xp_earned || 0) >= xp) return;
+
+    await supabase.from('student_daily_log').upsert({
+      student_id: id,
+      log_date:   today,
+      xp_earned:  xp,
+    }, { onConflict: 'student_id,log_date', ignoreDuplicates: false });
+  } catch {
+    // The stats write above already succeeded; a missed daily-log write only
+    // affects the dated leaderboards, so don't fail the PUT over it.
+  }
 }
 
 async function completeLesson(id, body) {

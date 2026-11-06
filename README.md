@@ -7,7 +7,7 @@ Leaderboard and student stats (XP, streaks, study time, lesson/topic completion,
 ## Endpoints
 | Route | What it does |
 |---|---|
-| `GET /student/leaderboard` | Ranked leaderboard |
+| `GET /student/leaderboard` | Ranked leaderboard. Options: `teacherEmail` (class leaderboard), `classGrade` (one of that teacher's grades), `period=all\|today\|week\|month\|custom` + `date=YYYY-MM-DD` (rank by XP earned in that range, from `student_daily_log`; weeks are Mon–Sun, days are UTC) |
 | `GET/PUT /student/:id` | Read / update a student's stats |
 | `POST /student/:id/complete-lesson, /start-topic, /study-time` | Record learning activity |
 | `GET /student/:id/weekly, /performance, /attempts` | Weekly progress, performance, quiz attempts |
