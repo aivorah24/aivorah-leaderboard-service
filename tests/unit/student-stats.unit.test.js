@@ -332,6 +332,21 @@ describe('getTopicAttempts', () => {
     expect(attempts[0].questions[0]).toEqual({ question: '2+2?', studentAnswer: '5', correctAnswer: '4', isCorrect: false, timeSeconds: 7 });
   });
 
+  test('the spoken question keeps its type and AI evaluation (History report)', async () => {
+    const evaluation = { score: 7, outOf: 10, passed: true, verdict: 'good', covered: ['main idea'], missing: [], mistakes: [], feedback: 'Nice!' };
+    supabase._chain.then = (resolve) => resolve({
+      data: [{ id: 'a3', topic: 'Kite', subject: 'English', attempt_number: 1, score: 67, passed: true, total_questions: 3, correct_answers: 2, time_spent_seconds: 90,
+        per_question_results: [...Q, { question: 'Explain "Kite"', studentAnswer: 'It flies', correctAnswer: '', isCorrect: true, timeSeconds: 40, type: 'spoken', evaluation }],
+        created_at: '2026-11-07T10:30:00Z' }],
+      error: null,
+    });
+    const { attempts } = await getTopicAttempts('student-1', 'English');
+    expect(attempts[0].createdAt).toBe('2026-11-07T10:30:00Z');
+    expect(attempts[0].questions[2]).toEqual({ question: 'Explain "Kite"', studentAnswer: 'It flies', correctAnswer: '', isCorrect: true, timeSeconds: 40, type: 'spoken', evaluation });
+    // ordinary questions are unchanged (no type / evaluation keys)
+    expect(attempts[0].questions[0]).not.toHaveProperty('type');
+  });
+
   test('a Supabase error returns no attempts rather than throwing', async () => {
     supabase._chain.then = (resolve) => resolve({ data: null, error: { message: 'boom' } });
     expect(await getTopicAttempts('student-1')).toEqual({ attempts: [] });

@@ -563,6 +563,10 @@ async function getTopicAttempts(id, subject) {
         correctAnswer: q.correctAnswer ?? '',
         isCorrect: !!q.isCorrect,
         timeSeconds: q.timeSeconds ?? null,
+        // The practice test's spoken question: kept so the History report can
+        // show what the student said and its AI evaluation.
+        ...(q.type ? { type: q.type } : {}),
+        ...(q.evaluation && typeof q.evaluation === 'object' ? { evaluation: q.evaluation } : {}),
       })),
     }));
   return { attempts };
