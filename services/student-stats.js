@@ -152,11 +152,12 @@ async function getOrCreate(studentId) {
   return data;
 }
 
-async function getStudentStats(id) {
+// The three lookups below don't depend on each other, so they run at the same
+// time: every Supabase/Qdrant round trip from Render costs ~0.25-0.6s, and
+// running them one after another made GET /student/:id take 1.4-2.6s.
+async function loadStatsRecord(id) {
   let record = await getOrCreate(id);
-  const today = todayISO();
-
-  const rollover = computeStreakRollover(record, today);
+  const rollover = computeStreakRollover(record, todayISO());
   if (rollover) {
     const { data: updated } = await supabase
       .from('student_stats')
@@ -169,7 +170,10 @@ async function getStudentStats(id) {
       .single();
     record = updated ?? record;
   }
+  return record;
+}
 
+async function loadTotalTopics(id) {
   const { data: userRow } = await supabase
     .from('users')
     .select('curriculum, grade')
@@ -178,13 +182,19 @@ async function getStudentStats(id) {
 
   const curriculum  = userRow?.curriculum ?? '';
   const grade       = userRow?.grade ?? '';
-  const totalTopics = await fetchTotalTopicsFromQdrant(curriculum, grade);
+  return fetchTotalTopicsFromQdrant(curriculum, grade);
+}
 
-  const { count: completedChallenges } = await supabase
-    .from('challenge_assignments')
-    .select('id', { head: true, count: 'exact' })
-    .eq('student_id', id)
-    .eq('status', 'completed');
+async function getStudentStats(id) {
+  const [record, totalTopics, { count: completedChallenges }] = await Promise.all([
+    loadStatsRecord(id),
+    loadTotalTopics(id),
+    supabase
+      .from('challenge_assignments')
+      .select('id', { head: true, count: 'exact' })
+      .eq('student_id', id)
+      .eq('status', 'completed'),
+  ]);
 
   const base = normalise(record);
   return {

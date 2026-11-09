@@ -49,6 +49,19 @@ describe('getStudentStats', () => {
     expect(result.studentId).toBe('s1');
   });
 
+  test('the stats row, the users row and the challenge count are requested at the same time', async () => {
+    let releaseStats;
+    supabase._chain.maybeSingle.mockReturnValueOnce(new Promise((r) => { releaseStats = r; }));
+    const pending = getStudentStats('s1');
+    await new Promise((r) => setImmediate(r));
+    // Still waiting on student_stats, yet the other two lookups already went out.
+    const tables = supabase.from.mock.calls.map((c) => c[0]);
+    expect(tables).toEqual(expect.arrayContaining(['student_stats', 'users', 'challenge_assignments']));
+    releaseStats({ data: STATS_ROW });
+    const result = await pending;
+    expect(result.xpPoints).toBe(200);
+  });
+
   test('a real Qdrant failure falls back to totalTopics: 0, not a thrown error', async () => {
     qdrant.client.scroll.mockRejectedValue(new Error('unreachable'));
     const result = await getStudentStats('s1');
