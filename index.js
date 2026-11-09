@@ -1,6 +1,7 @@
 // Standalone leaderboard microservice — extracted from ai-mentor/server/routes/student.js.
 // Serves GET /student/leaderboard on its own port.
 
+const compression = require('compression');
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -8,6 +9,8 @@ const leaderboardRoute = require('./routes/leaderboard');
 const studentStatsRoute = require('./routes/student-stats');
 
 const app = express();
+// gzip responses before they leave the service (smaller JSON on slow connections).
+app.use(compression());
 app.use(cors());
 app.use(express.json());
 
